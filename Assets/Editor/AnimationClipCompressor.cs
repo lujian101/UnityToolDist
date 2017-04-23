@@ -1,0 +1,1172 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Linq;
+using UnityEditor;
+using UnityEngine;
+using System.Threading;
+using System.Diagnostics;
+using Common;
+
+#pragma warning disable 0618
+
+namespace AresEditor.ArcReactor.ArtistKit {
+
+    class AnimationClipCompressor : EditorWindow {
+
+        internal class Arg {
+            internal String targetName = String.Empty;
+            internal float positionError = 0.01f;
+            internal float rotationError = 0.05f;
+            internal float scaleError = 0.01f;
+            internal float depthScale = 1.125f;
+            internal bool removeScaleCurve = false;
+            internal Arg Clone() {
+                return new Arg() {
+                    targetName = this.targetName,
+                    positionError = this.positionError,
+                    rotationError = this.rotationError,
+                    scaleError = this.scaleError,
+                    depthScale = this.depthScale,
+                    removeScaleCurve = this.removeScaleCurve,
+                };
+            }
+            internal void CopyFrom( Arg args ) {
+                targetName = args.targetName;
+                positionError = args.positionError;
+                rotationError = args.rotationError;
+                scaleError = args.scaleError;
+                depthScale = args.depthScale;
+                removeScaleCurve = args.removeScaleCurve;
+            }
+            public override String ToString() {
+                return String.Format(
+                    "{0} : p = {1}, r = {2}, s = {3}, d = {4}, rms = {5}",
+                    targetName,
+                    positionError <= 0 ? "--" : positionError.ToString(),
+                    rotationError <= 0 ? "--" : rotationError.ToString(),
+                    scaleError <= 0 ? "--" : scaleError.ToString(),
+                    depthScale,
+                    removeScaleCurve.ToString().ToLower()
+                );
+            }
+            public void Reset() {
+                positionError = 0.01f;
+                rotationError = 0.05f;
+                scaleError = 0.01f;
+                depthScale = 1.125f;
+                removeScaleCurve = false;
+            }
+        }
+
+        internal class ClipInfo {
+            internal bool selected = false;
+            internal String title = String.Empty;
+            internal String path = String.Empty;
+            internal int size = 0;
+            internal int compressed_size = -1;
+            internal int refCount = 0;
+            internal int sizePerSec = 0;
+            AnimationClip _clip = null;
+            internal AnimationClip clip {
+                get {
+                    if ( _clip == null && !String.IsNullOrEmpty( path ) ) {
+                        _clip = AssetDatabase.LoadAssetAtPath( path, typeof( AnimationClip ) ) as AnimationClip;
+                    }
+                    return _clip;
+                }
+                set {
+                    _clip = value;
+                }
+            }
+        }
+
+        internal class Overall {
+            internal int totalSize = 0;
+            internal int compressedSize = 0;
+            internal int savedSize = 0;
+        }
+
+        enum SortType {
+            Name,
+            Size,
+            Rate,
+        }
+        static readonly String[] SortOptions = new String[] { "Name", "Size", "Rate" };
+
+        const int WarningSize = 1 << 18;
+
+        static AnimationClipCompressor m_window = null;
+        static List<Arg> m_args = null;
+        static Vector2 m_argsViewPos = Vector2.zero;
+        static Vector2 m_clipsViewPos = Vector2.zero;
+        static Dictionary<String, ClipInfo> m_selectedAnimationClips = new Dictionary<String, ClipInfo>();
+        static List<ClipInfo> m_sortedAnimations = new List<ClipInfo>();
+        static int m_selectedCount = 0;
+        static String[] m_animName = null;
+        static SortType m_animListSortType = SortType.Name;
+        static int m_nameSel = -1;
+        static Arg m_argEditing = new Arg();
+        static Overall m_overall = new Overall();
+
+        [MenuItem( "Tools/AnimationClipCompressor" )]
+        static void Init() {
+            if ( m_window == null ) {
+                m_window = EditorWindow.GetWindow<AnimationClipCompressor>( "AnimationClip Compressor", true, typeof( EditorWindow ) );
+            }
+            m_window.minSize = new Vector2( 600, 300 );
+            m_window.Show();
+        }
+
+        static Dictionary<String, ClipInfo> Scan() {
+            var o = Selection.objects;
+            var assets = new HashSet<String>();
+            var ret = new Dictionary<String, ClipInfo>();
+            var prefabInstanceSelected = false;
+            for ( int i = 0; i < o.Length; ++i ) {
+                var path = AssetDatabase.GetAssetPath( o[ i ] );
+                if ( !String.IsNullOrEmpty( path ) ) {
+                    assets.Add( path );
+                } else {
+                    var prefab = PrefabUtility.GetPrefabParent( o[ i ] );
+                    if ( prefab ) {
+                        path = AssetDatabase.GetAssetPath( prefab );
+                        if ( !String.IsNullOrEmpty( path ) ) {
+                            assets.Add( path );
+                            prefabInstanceSelected = true;
+                        }
+                    }
+                }
+            }
+            if ( !prefabInstanceSelected ) {
+                var pathList = EditorUtils.GetAllSelectedPath();
+                if ( pathList != null && pathList.Count > 0 ) {
+                    for ( int i = 0; i < pathList.Count; ++i ) {
+                        if ( System.IO.Directory.Exists( pathList[ i ] ) ) {
+                            var fs = FileUtils.GetFileList( pathList[ i ], EditorUtils.FileFilter_prefab );
+                            for ( int j = 0; j < fs.Count; ++j ) {
+                                var assetPath = EditorUtils.RelateToAssetsPath( fs[ j ] );
+                                assets.Add( assetPath );
+                            }
+                        }
+                    }
+                }
+            }
+            var list = assets.ToList();
+            list.Sort();
+            try {
+                var _InputRoot = "^" + AnimationClipCompressImp.InputRoot;
+                var par = new String[ 1 ] { null };
+                for ( int i = 0; i < list.Count; ++i ) {
+                    if ( EditorUtility.DisplayCancelableProgressBar( "Animation Clip Collecting" + new String( '.', Utils.GetSystemTicksSec() % 3 ), list[ i ], ( float )i / list.Count ) ) {
+                        break;
+                    }
+                    par[ 0 ] = list[ i ];
+                    var deps = AssetDatabase.GetDependencies( par ).Where( n => n.EndsWith( ".anim" ) ).ToList();
+                    for ( int j = 0; j < deps.Count; ++j ) {
+                        ClipInfo ci;
+                        if ( !ret.TryGetValue( deps[ j ], out ci ) ) {
+                            ci = new ClipInfo();
+                            var n = deps[ j ];
+                            var pos = -2;
+                            for ( int k = n.Length - 1; k >= 0; --k ) {
+                                if ( n[ k ] == '/' ) {
+                                    if ( pos < -1 ) {
+                                        pos++;
+                                    } else {
+                                        pos = k;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ( pos >= 0 ) {
+                                n = "..." + n.Substring( pos, n.Length - pos - ".anim".Length );
+                            }
+                            ci.title = n;
+                            var assetPath = deps[ j ];
+                            var outAssetPath = String.Empty;
+                            if ( assetPath.StartsWith( AnimationClipCompressImp.OutputRoot ) ) {
+                                var srcAssetPath = assetPath.Replace( AnimationClipCompressImp.OutputRoot, AnimationClipCompressImp.InputRoot );
+                                outAssetPath = assetPath;
+                                assetPath = srcAssetPath;
+                            } else {
+                                outAssetPath = Regex.Replace( assetPath, _InputRoot, AnimationClipCompressImp.OutputRoot );
+                            }
+                            var inFileInfo = new FileInfo( assetPath );
+                            var outFileInfo = new FileInfo( outAssetPath );
+                            ci.path = assetPath;
+                            ci.size = outFileInfo.Exists ? ( int )outFileInfo.Length : ( inFileInfo.Exists ? ( int )inFileInfo.Length : -1 );
+                            ci.compressed_size = outFileInfo.Exists && inFileInfo.Exists ? ( int )inFileInfo.Length : -1;
+                            ci.clip = AssetDatabase.LoadAssetAtPath( assetPath, typeof( AnimationClip ) ) as AnimationClip;
+                            ci.sizePerSec = ( int )( ci.size / ci.clip.length );
+                            ret.Add( deps[ j ], ci );
+                        }
+                        ci.refCount++;
+                    }
+                }
+            } finally {
+                EditorUtility.ClearProgressBar();
+            }
+            return ret;
+        }
+
+        static String[] TakeAnimNames( List<ClipInfo> clips, int maxCount = -1 ) {
+            var set = new Dictionary<String, int>();
+            String[] ret = null;
+            for ( int i = 0; i < clips.Count; ++i ) {
+                var name = clips[ i ].clip.name;
+                if ( set.ContainsKey( name ) ) {
+                    set[ name ] = set[ name ] + 1;
+                } else {
+                    set[ name ] = 1;
+                }
+            }
+            var sorter = new List<KeyValuePair<String, int>>();
+            foreach ( var item in set ) {
+                sorter.Add( item );
+            }
+            sorter.Sort(
+                ( l, r ) => {
+                    var c = r.Value.CompareTo( l.Value );
+                    if ( c == 0 ) {
+                        c = l.Key.CompareTo( r.Key );
+                    }
+                    return c;
+                }
+            );
+            if ( maxCount <= 0 ) {
+                maxCount = sorter.Count;
+            } else {
+                maxCount = Math.Min( maxCount, sorter.Count );
+            }
+            ret = new String[ maxCount ];
+            for ( int i = 0; i < maxCount; ++i ) {
+                ret[ i ] = sorter[ i ].Key;
+            }
+            return ret;
+        }
+
+        static void SortClips( List<ClipInfo> clips, SortType type ) {
+            switch ( type ) {
+            case SortType.Name:
+                clips.Sort(
+                    ( l, r ) => {
+                        var c = l.title.CompareTo( r.title );
+                        if ( c == 0 ) {
+                            c = r.size.CompareTo( l.size );
+                            if ( c == 0 ) {
+                                c = r.sizePerSec.CompareTo( l.sizePerSec );
+                            }
+                        }
+                        return c;
+                    }
+                );
+                break;
+            case SortType.Size:
+                clips.Sort(
+                    ( l, r ) => {
+                        var c = r.size.CompareTo( l.size );
+                        if ( c == 0 ) {
+                            c = r.sizePerSec.CompareTo( l.sizePerSec );
+                            if ( c == 0 ) {
+                                c = l.title.CompareTo( r.title );
+                            }
+                        }
+                        return c;
+                    }
+                );
+                break;
+            case SortType.Rate:
+                clips.Sort(
+                    ( l, r ) => {
+                        var c = r.sizePerSec.CompareTo( l.sizePerSec );
+                        if ( c == 0 ) {
+                            c = r.size.CompareTo( l.size );
+                            if ( c == 0 ) {
+                                c = l.title.CompareTo( r.title );
+                            }
+                        }
+                        return c;
+                    }
+                );
+                break;
+            }
+        }
+
+        static void UpdateOverall() {
+            m_overall.totalSize = 0;
+            m_overall.compressedSize = 0;
+            m_overall.savedSize = 0;
+            if ( m_sortedAnimations != null ) {
+                for ( int i = 0; i < m_sortedAnimations.Count; ++i ) {
+                    var ci = m_sortedAnimations[ i ];
+                    m_overall.totalSize += ci.size;
+                    m_overall.compressedSize += ci.compressed_size > 0 ? ci.compressed_size : ci.size;
+                }
+                m_overall.savedSize = m_overall.totalSize - m_overall.compressedSize;
+            }
+        }
+
+        void OnGUI() {
+            EditorGUILayout.BeginVertical();
+            EditorGUILayout.BeginHorizontal();
+            if ( m_selectedAnimationClips.Count == 0 ) {
+                if ( GUILayout.Button( "Select Folders or Assets to Open" ) ) {
+                    m_selectedAnimationClips = Scan();
+                    m_sortedAnimations = m_selectedAnimationClips.Values.ToList();
+                    SortClips( m_sortedAnimations, m_animListSortType );
+                    m_animName = TakeAnimNames( m_sortedAnimations );
+                    m_selectedCount = 0;
+                    m_overall = new Overall();
+                    if ( m_args == null || m_args.Count == 0 ) {
+                        m_args = m_args ?? new List<Arg>();
+                        m_args.Add( m_argEditing.Clone() );
+                        m_args[ 0 ].targetName = "<default>";
+                    }
+                    UpdateOverall();
+                }
+            } else {
+                if ( GUILayout.Button( "Close" ) ) {
+                    m_selectedAnimationClips.Clear();
+                    m_sortedAnimations.Clear();
+                    m_selectedCount = 0;
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+            if ( m_selectedAnimationClips.Count > 0 ) {
+                EditorGUILayout.BeginHorizontal();
+                {
+                    EditorGUILayout.Separator();
+                    EditorGUILayout.BeginVertical();
+                    var type = ( SortType )GUILayout.Toolbar( ( int )m_animListSortType, SortOptions, GUILayout.MaxWidth( 550 ) );
+                    EditorGUILayout.LabelField(
+                        String.Format( "size = {0}, compressed = {1}, saved = {2}",
+                            StringUtils.FormatMemorySize( m_overall.totalSize ),
+                            StringUtils.FormatMemorySize( m_overall.compressedSize ),
+                            StringUtils.FormatMemorySize( m_overall.savedSize )
+                        )
+                    );
+                    if ( type != m_animListSortType ) {
+                        m_animListSortType = type;
+                        SortClips( m_sortedAnimations, m_animListSortType );
+                        m_animName = TakeAnimNames( m_sortedAnimations );
+                    }
+                    EditorGUILayout.Separator();
+                    m_clipsViewPos = EditorGUILayout.BeginScrollView( m_clipsViewPos, GUILayout.MaxWidth( 550 ) );
+                    {
+                        EditorGUILayout.BeginHorizontal();
+                        {
+                            EditorGUILayout.BeginVertical();
+                            for ( int i = 0; i < m_sortedAnimations.Count; ++i ) {
+                                EditorGUILayout.BeginHorizontal();
+                                var ci = m_sortedAnimations[ i ];
+                                var newstate = EditorGUILayout.ToggleLeft( "", ci.selected, GUILayout.Width( 16 ) );
+                                if ( newstate != ci.selected ) {
+                                    ci.selected = newstate;
+                                    if ( Event.current.shift ) {
+                                        m_sortedAnimations.ForEach( _ci => _ci.selected = newstate );
+                                    } else if ( Event.current.control ) {
+                                        m_sortedAnimations.ForEach(
+                                            _ci => {
+                                                if ( LevenshteinDistance.LevenshteinDistancePercent( ci.clip.name, _ci.clip.name ) > 0.6 ) {
+                                                    _ci.selected = newstate;
+                                                }
+                                            }
+                                        );
+                                    }
+                                    m_selectedCount = m_sortedAnimations.Count( _ci => _ci.selected );
+                                }
+                                var color = GUI.color;
+                                if ( ci.size > WarningSize ) {
+                                    GUI.color = Color.red;
+                                } else {
+                                    GUI.color = Color.white;
+                                }
+                                EditorGUILayout.LabelField( ci.title );
+                                EditorGUILayout.EndHorizontal();
+                                GUI.color = color;
+                            }
+                            EditorGUILayout.EndVertical();
+
+                            EditorGUILayout.Separator();
+
+                            EditorGUILayout.BeginVertical();
+                            for ( int i = 0; i < m_sortedAnimations.Count; ++i ) {
+                                var ci = m_sortedAnimations[ i ];
+                                EditorGUILayout.LabelField( String.Format( "size = {0} / {1}", StringUtils.FormatMemorySize( ci.size ), ci.compressed_size > 0 ? StringUtils.FormatMemorySize( ci.compressed_size ) : "--" ) );
+                            }
+                            EditorGUILayout.EndVertical();
+
+                            EditorGUILayout.Separator();
+
+                            EditorGUILayout.BeginVertical();
+                            for ( int i = 0; i < m_sortedAnimations.Count; ++i ) {
+                                var ci = m_sortedAnimations[ i ];
+                                EditorGUILayout.LabelField( String.Format( "rate = {0}/sec", StringUtils.FormatMemorySize( ci.sizePerSec ) ) );
+                            }
+                            EditorGUILayout.EndVertical();
+                        }
+                        EditorGUILayout.EndHorizontal();
+                    }
+                    EditorGUILayout.EndScrollView();
+                    EditorGUILayout.Space();
+                    EditorGUILayout.EndVertical();
+                }
+                EditorGUILayout.Separator();
+                {
+                    EditorGUILayout.BeginVertical();
+                    EditorGUILayout.Separator();
+                    if ( m_animName != null && m_animName.Length > 0 ) {
+                        var oldSel = m_nameSel;
+                        m_nameSel = m_nameSel < 0 ? 0 : m_nameSel;
+                        var newSel = EditorGUILayout.Popup( "Clip Name:", m_nameSel, m_animName );
+                        if ( newSel != m_nameSel || oldSel != newSel ) {
+                            m_nameSel = newSel;
+                            if ( m_animName != null && m_nameSel >= 0 ) {
+                                m_argEditing.targetName = m_animName[ m_nameSel ];
+                            } else {
+                                m_argEditing.targetName = String.Empty;
+                            }
+                        }
+                    }
+                    var newName = EditorGUILayout.TextField( "", m_argEditing.targetName );
+                    if ( newName != m_argEditing.targetName ) {
+                        var sel = Array.IndexOf( m_animName, newName );
+                        if ( sel != -1 ) {
+                            m_nameSel = sel;
+                            m_argEditing.targetName = newName;
+                        }
+                    }
+                    var color = GUI.color;
+                    GUI.color = m_argEditing.positionError > 0 ? Color.white : Color.gray;
+                    m_argEditing.positionError = EditorGUILayout.FloatField( "Position Error:", m_argEditing.positionError );
+                    m_argEditing.positionError = Mathf.Clamp( m_argEditing.positionError, 0, 1 );
+                    GUI.color = m_argEditing.rotationError > 0 ? Color.white : Color.gray;
+                    m_argEditing.rotationError = EditorGUILayout.FloatField( "Rotation Error:", m_argEditing.rotationError );
+                    m_argEditing.rotationError = Mathf.Clamp( m_argEditing.rotationError, 0, 1 );
+                    GUI.color = m_argEditing.scaleError > 0 ? Color.white : Color.gray;
+                    m_argEditing.scaleError = EditorGUILayout.FloatField( "Scale Error:", m_argEditing.scaleError );
+                    m_argEditing.scaleError = Mathf.Clamp( m_argEditing.scaleError, 0, 1 );
+                    GUI.color = color;
+                    m_argEditing.depthScale = EditorGUILayout.FloatField( "Depth Scale:", m_argEditing.depthScale );
+                    m_argEditing.depthScale = Math.Max( m_argEditing.depthScale, 1 );
+                    m_argEditing.depthScale = Mathf.Clamp( m_argEditing.depthScale, 1, 2 );
+                    m_argEditing.removeScaleCurve = EditorGUILayout.Toggle( "Remove Scale Curve", m_argEditing.removeScaleCurve );
+                    EditorGUILayout.BeginHorizontal();
+                    if ( GUILayout.Button( "Add" ) ) {
+                        m_args = m_args ?? new List<Arg>();
+                        if ( m_animName != null && m_nameSel >= 0 ) {
+                            m_argEditing.targetName = m_animName[ m_nameSel ];
+                        } else {
+                            m_argEditing.targetName = String.Empty;
+                        }
+                        var name = m_argEditing.targetName ?? String.Empty;
+                        name = name.Trim();
+                        if ( !String.IsNullOrEmpty( name ) ) {
+                            m_argEditing.targetName = name;
+                            var exists = m_args.Find( n => n.targetName == m_argEditing.targetName );
+                            if ( exists == null ) {
+                                m_args.Add( m_argEditing.Clone() );
+                                m_args.Sort( ( l, r ) => l.targetName.CompareTo( r.targetName ) );
+                            } else {
+                                exists.CopyFrom( m_argEditing );
+                            }
+                        }
+                    }
+                    if ( GUILayout.Button( "Reset", GUILayout.MaxWidth( 60 ) ) ) {
+                        m_argEditing.Reset();
+                        GUI.FocusControl( "Add" );
+                    }
+                    EditorGUILayout.EndHorizontal();
+                    if ( m_args != null ) {
+                        EditorGUILayout.BeginVertical();
+                        m_argsViewPos = EditorGUILayout.BeginScrollView( m_argsViewPos, GUILayout.Width( 360 ) );
+                        var remove = -1;
+                        for ( int i = 0; i < m_args.Count; ++i ) {
+                            EditorGUILayout.BeginHorizontal();
+                            if ( GUILayout.Button( "-", GUILayout.Width( 20 ) ) ) {
+                                remove = i;
+                            }
+                            EditorGUILayout.LabelField( m_args[ i ].ToString(), GUILayout.MinWidth( 320 ) );
+                            EditorGUILayout.EndHorizontal();
+                        }
+                        if ( remove != -1 ) {
+                            m_args.RemoveAt( remove );
+                        }
+                        EditorGUILayout.EndScrollView();
+                        EditorGUILayout.EndVertical();
+                    }
+                    EditorGUILayout.Separator();
+                    if ( GUILayout.Button( "<< Compress >>" ) ) {
+                        DoCompress();
+                        UpdateOverall();
+                    }
+                    //if ( GUILayout.Button( "<< Save >>" ) ) {
+                    //    SaveOnly();
+                    //}
+                    EditorGUILayout.HelpBox( String.Format( "Total AnimationClip Count: {0}, Selected: {1}", m_sortedAnimations != null ? m_sortedAnimations.Count : 0, m_selectedCount ), MessageType.Info );
+                    EditorGUILayout.Separator();
+                    EditorGUILayout.EndVertical();
+                }
+                EditorGUILayout.Separator();
+                EditorGUILayout.EndHorizontal();
+            }
+            EditorGUILayout.EndVertical();
+        }
+
+        static void DoCompress() {
+            if ( m_sortedAnimations != null ) {
+                AnimationClipCompressImp.ExportAll( m_sortedAnimations, m_args, m_argEditing );
+            }
+        }
+
+        static void SaveOnly() {
+            if ( m_sortedAnimations != null ) {
+                AnimationClipCompressImp.ExportAll( m_sortedAnimations, m_args, m_argEditing, true );
+            }
+        }
+    }
+
+    internal static class LevenshteinDistance {
+
+        static private int LowerOfThree( int first, int second, int third ) {
+            int min = Math.Min( first, second );
+            return Math.Min( min, third );
+        }
+
+        static private int Levenshtein_Distance( string str1, string str2 ) {
+            int[, ] Matrix;
+            int n = str1.Length;
+            int m = str2.Length;
+            int temp = 0;
+            char ch1;
+            char ch2;
+            int i = 0;
+            int j = 0;
+            if ( n == 0 ) {
+                return m;
+            }
+            if ( m == 0 ) {
+                return n;
+            }
+            Matrix = new int[ n + 1, m + 1 ];
+
+            for ( i = 0; i <= n; i++ ) {
+                Matrix[ i, 0 ] = i;
+            }
+
+            for ( j = 0; j <= m; j++ ) {
+                Matrix[ 0, j ] = j;
+            }
+
+            for ( i = 1; i <= n; i++ ) {
+                ch1 = str1[ i - 1 ];
+                for ( j = 1; j <= m; j++ ) {
+                    ch2 = str2[ j - 1 ];
+                    if ( ch1.Equals( ch2 ) ) {
+                        temp = 0;
+                    } else {
+                        temp = 1;
+                    }
+                    Matrix[ i, j ] = LowerOfThree( Matrix[ i - 1, j ] + 1, Matrix[ i, j - 1 ] + 1, Matrix[ i - 1, j - 1 ] + temp );
+                }
+            }
+            return Matrix[ n, m ];
+        }
+
+        public static float LevenshteinDistancePercent( string str1, string str2 ) {
+            int val = Levenshtein_Distance( str1, str2 );
+            return 1 - ( float )val / Math.Max( str1.Length, str2.Length );
+        }
+    }
+
+    internal class CurveCompressor {
+
+        public static float m_positionError = 0;
+        public static float m_rotationError = 0;
+        public static float m_scaleError = 0;
+        public static float m_depthScale = 1;
+        public static bool m_removeScaleCurve = false;
+
+        const float TangentEpsilon = 1e-4f;
+
+        class KeyframeSample {
+            public enum Type {
+                Position,
+                Rotation,
+                Scale,
+                Other,
+            }
+            public Keyframe keyframe;
+            public Vector2 pos;
+        }
+
+        static List<Keyframe> __keyframes = new List<Keyframe>();
+        static List<KeyframeSample> __samples = new List<KeyframeSample>();
+
+        static float Round0( float f ) {
+            return Math.Abs( f ) < TangentEpsilon ? 0 : f;
+        }
+
+        static List<KeyframeSample> TakeSamples( AnimationClipCurveData curveData, out float maxValue, out float minValue, out float averageValue ) {
+            List<KeyframeSample> samples = __samples;
+            samples.Clear();
+            var valueSum = 0.0f;
+            var min = float.MaxValue;
+            var max = float.MinValue;
+            var curve = curveData.curve;
+            var keys = curve.keys;
+            var kcount = keys.Length;
+            for ( int k = 0; k < kcount; ++k ) {
+                var v = keys[ k ].value;
+                if ( v > max ) {
+                    max = v;
+                }
+                if ( v < min ) {
+                    min = v;
+                }
+                valueSum += v;
+                var sample = new KeyframeSample();
+                sample.keyframe = keys[ k ];
+                sample.pos = new Vector2( keys[ k ].time, v );
+                samples.Add( sample );
+            }
+            maxValue = max;
+            minValue = min;
+            averageValue = valueSum / kcount;
+            return samples;
+        }
+
+        static List<Keyframe> CopyKeyframes( AnimationClipCurveData curveData ) {
+            var curve = curveData.curve;
+            return curve.keys.ToList();
+        }
+
+        static void TrimKeyframes( ref List<Keyframe> keyframes, List<KeyframeSample> samples, float epsilon ) {
+            var kcount = samples.Count;
+            var lastIsRemoved = false;
+            var lastKeyframe = new Keyframe();
+            var error = 0.0f;
+            var lastOut = Round0( samples[ 0 ].keyframe.outTangent );
+            keyframes.Add( samples[ 0 ].keyframe );
+            for ( var k = 1; k < kcount - 1; ++k ) {
+                var kf = samples[ k ].keyframe;
+                var diff = samples[ k ].pos.y - samples[ k - 1 ].pos.y;
+                var _in = ( samples[ k ].pos.y - samples[ k - 1 ].pos.y ) / ( samples[ k ].pos.x - samples[ k - 1 ].pos.x );
+                var _out = ( samples[ k + 1 ].pos.y - samples[ k ].pos.y ) / ( samples[ k + 1 ].pos.x - samples[ k ].pos.x );
+                var curIn = Round0( kf.inTangent );
+                _in = Round0( _in );
+                _out = Round0( _out );
+                error += diff;
+                var lastkf = samples[ samples.Count - 1 ];
+                var skip = false;
+                var nextLinearValue = lastkf.keyframe.value + ( kf.time - lastkf.keyframe.time ) * lastkf.keyframe.outTangent;
+                if ( Math.Abs( kf.inTangent - lastkf.keyframe.outTangent ) < TangentEpsilon &&
+                    Math.Abs( kf.inTangent - kf.outTangent ) < TangentEpsilon ) {
+                    if ( Mathf.Abs( nextLinearValue - kf.value ) < epsilon ) {
+                        skip = true;
+                    }
+                }
+                if ( !skip && ( _in * _out < 0 || curIn * lastOut < 0 || Mathf.Abs( error ) > epsilon || Mathf.Abs( curIn - lastOut ) > TangentEpsilon ) ) {
+                    if ( lastIsRemoved ) {
+                        keyframes.Add( lastKeyframe );
+                        lastIsRemoved = false;
+                    }
+                    keyframes.Add( kf );
+                    error = 0;
+                    lastOut = Round0( kf.outTangent );
+                } else {
+                    lastIsRemoved = true;
+                    lastKeyframe = kf;
+                }
+            }
+            keyframes.Add( samples[ kcount - 1 ].keyframe );
+        }
+
+        static List<Keyframe> TrimPositionKeyframes( AnimationClipCurveData curveData ) {
+            var keyframes = __keyframes;
+            float maxValue, minValue, averageValue;
+            keyframes.Clear();
+            var samples = TakeSamples( curveData, out maxValue, out minValue, out averageValue );
+            if ( samples.Count <= 2 ) {
+                for ( var i = 0; i < samples.Count; ++i ) {
+                    keyframes.Add( samples[ i ].keyframe );
+                }
+                return keyframes;
+            }
+            var depth = curveData.propertyName.Split( '/' ).Length;
+            var epsilon = Mathf.Abs( m_positionError ) * m_depthScale * depth;
+            TrimKeyframes( ref keyframes, samples, epsilon );
+            return keyframes;
+        }
+
+        static List<Keyframe> TrimRotationKeyframes( AnimationClipCurveData curveData ) {
+            List<Keyframe> keyframes = __keyframes;
+            float maxValue, minValue, averageValue;
+            keyframes.Clear();
+            List<KeyframeSample> samples = TakeSamples( curveData, out maxValue, out minValue, out averageValue );
+            if ( samples.Count <= 2 ) {
+                for ( int i = 0; i < samples.Count; ++i ) {
+                    keyframes.Add( samples[ i ].keyframe );
+                }
+                return keyframes;
+            }
+            int depth = curveData.propertyName.Split( '/' ).Length;
+            var epsilon = Mathf.Abs( m_rotationError ) * depth * m_depthScale;
+            TrimKeyframes( ref keyframes, samples, epsilon );
+            return keyframes;
+        }
+
+        static List<Keyframe> TrimScaleKeyframes( AnimationClipCurveData curveData ) {
+            var keyframes = __keyframes;
+            float maxValue, minValue, averageValue;
+            keyframes.Clear();
+            var samples = TakeSamples( curveData, out maxValue, out minValue, out averageValue );
+            if ( samples.Count <= 2 ) {
+                for ( int i = 0; i < samples.Count; ++i ) {
+                    keyframes.Add( samples[ i ].keyframe );
+                }
+                return keyframes;
+            }
+            var depth = curveData.propertyName.Split( '/' ).Length;
+            var epsilon = Mathf.Abs( m_scaleError ) * depth * m_depthScale;
+            TrimKeyframes( ref keyframes, samples, epsilon );
+            return keyframes;
+        }
+
+        static AnimationClipCurveData TrimClipData( AnimationClipCurveData curveData ) {
+            var keyframes = __keyframes;
+            var samples = __samples;
+            keyframes.Clear();
+            samples.Clear();
+            if ( curveData.type != typeof( Transform ) ) {
+                return curveData;
+            }
+            var pname = curveData.propertyName;
+            if ( pname.IndexOf( "Scale" ) != -1 && m_scaleError > 0 ) {
+                keyframes = TrimScaleKeyframes( curveData );
+            } else if ( pname.IndexOf( "Position" ) != -1 && m_positionError > 0 ) {
+                keyframes = TrimPositionKeyframes( curveData );
+            } else if ( !m_removeScaleCurve && pname.IndexOf( "Rotation" ) != -1 && m_rotationError > 0 ) {
+                keyframes = TrimRotationKeyframes( curveData );
+            } else {
+                keyframes = CopyKeyframes( curveData );
+            }
+            var oriKeys = curveData.curve.keys;
+            var kcount = oriKeys.Length;
+            if ( keyframes.Count != kcount ) {
+                var newData = new AnimationClipCurveData();
+                newData.path = curveData.path;
+                newData.propertyName = curveData.propertyName;
+                newData.type = curveData.type;
+                var oldCurve = curveData.curve;
+                var newCurve = new AnimationCurve();
+                newCurve.postWrapMode = oldCurve.postWrapMode;
+                newCurve.preWrapMode = oldCurve.preWrapMode;
+                var kfs = keyframes.ToArray();
+                newCurve.keys = kfs;
+                newData.curve = newCurve;
+                curveData = newData;
+            }
+            return curveData;
+        }
+
+        public static bool TrimAnimationClip( ref AnimationClip clip, ref AnimationClip oriClip ) {
+            var path = AssetDatabase.GetAssetPath( clip );
+            if ( String.IsNullOrEmpty( path ) == false && oriClip != null ) {
+                var clipName = oriClip.name;
+                var curves = AnimationUtility.GetAllCurves( oriClip, true );
+                if ( curves == null || curves.Length == 0 ) {
+                    return false;
+                }
+                var animationClip = UnityEngine.Object.Instantiate( clip ) as AnimationClip;
+                animationClip.ClearCurves();
+                for ( int c = 0; c < curves.Length; ++c ) {
+                    var curveData = TrimClipData( curves[ c ] );
+                    if ( m_removeScaleCurve == false || curveData.propertyName.IndexOf( "Scale" ) == -1 ) {
+                        animationClip.SetCurve( curveData.path, curveData.type, curveData.propertyName, curveData.curve );
+                    }
+                }
+                String _path = String.Empty;
+                String _ext = String.Empty;
+                StringUtils.SplitBaseFilename( path, out _path, out _ext );
+                var tempFile = AnimationClipCompressImp.OutputRoot + "/" + Path.GetFileName( path );
+                var tempFileMeta = tempFile + ".meta";
+                if ( File.Exists( tempFile ) ) {
+                    AssetDatabase.DeleteAsset( tempFile );
+                    AssetDatabase.Refresh();
+                    int c = 0;
+                    if ( File.Exists( tempFile ) ) {
+                        File.Delete( tempFile );
+                        ++c;
+                    }
+                    if ( File.Exists( tempFileMeta ) ) {
+                        File.Delete( tempFileMeta );
+                        ++c;
+                    }
+                    if ( c > 0 ) {
+                        AssetDatabase.Refresh();
+                    }
+                }
+                Resources.UnloadAsset( clip );
+                AssetDatabase.CreateAsset( animationClip, tempFile );
+                animationClip.name = clipName;
+                AssetDatabase.Refresh();
+                if ( File.Exists( tempFile ) &&
+                    File.Exists( tempFileMeta ) ) {
+                    if ( clip != null ) {
+                        Resources.UnloadAsset( clip );
+                        clip = null;
+                    }
+                    // deleting a file seems like an asynchronous operation,
+                    // so rename it first to avoid conflict
+                    var deleteFile = path + ".deleted";
+                    File.Move( path, deleteFile );
+                    File.Delete( deleteFile );
+                    if ( File.Exists( path ) ) {
+                        AssetDatabase.DeleteAsset( tempFile );
+                        return false;
+                    }
+                    try {
+                        File.Move( tempFile, path );
+                    } catch ( Exception e ) {
+                        ULogFile.sharedInstance.LogError( "Rename {0} -> {1}, {2}", tempFile, path, e );
+                        AssetDatabase.DeleteAsset( tempFile );
+                        return false;
+                    }
+                    File.Delete( tempFileMeta );
+                    var o = AssetDatabase.LoadAssetAtPath( path, typeof( AnimationClip ) ) as AnimationClip;
+                    if ( o != null ) {
+                        o.name = clipName;
+                        EditorUtility.SetDirty( o );
+                        clip = o;
+                    }
+                    AssetDatabase.Refresh();
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    internal class AnimationClipCompressImp {
+
+        internal const String InputRoot = "Assets";
+        internal const String OutputRoot = "Assets/__backup_animations__";
+
+        const String RecordRoot = "Assets/__export_record__";
+        const String RecordFileName = "AnimationCompressRecord.json";
+        static Dictionary<String, String> m_records = null;
+
+        static String GetRecordFilePath() {
+            return RecordRoot + "/" + RecordFileName;
+        }
+
+        static String GetTempRecordFilePath() {
+            return RecordRoot + "/" + RecordFileName + ".tmp";
+        }
+
+        static bool ReadRecordFromFile() {
+            if ( m_records == null ) {
+                m_records = new Dictionary<String, String>();
+            } else {
+                m_records.Clear();
+            }
+            var _InputRoot = "^" + InputRoot;
+            var fullPath = GetRecordFilePath();
+            if ( File.Exists( fullPath ) ) {
+                try {
+                    var text = File.ReadAllText( fullPath );
+                    var obj = JSONObject.Create( text );
+                    if ( obj != null ) {
+                        var keys = obj.keys;
+                        if ( keys != null ) {
+                            for ( int i = 0; i < keys.Count; ++i ) {
+                                var path = keys[ i ];
+                                var info = obj.GetField( path );
+                                if ( info != null && info.type == JSONObject.Type.STRING ) {
+                                    if ( !System.IO.File.Exists( path ) ) {
+                                        continue;
+                                    }
+                                    if ( !path.StartsWith( OutputRoot ) ) {
+                                        EditorUtility.DisplayProgressBar(
+                                            "Load compressed animation record" + new String( '.', Common.Utils.GetSystemTicksSec() % 3 + 1 ),
+                                            path, ( float )i / keys.Count );
+                                        var dstFilePath = Regex.Replace( path, _InputRoot, OutputRoot );
+                                        if ( !System.IO.File.Exists( dstFilePath ) ) {
+                                            continue;
+                                        }
+                                        m_records[ path ] = info.str;
+                                    }
+                                }
+                            }
+                        }
+                        return true;
+                    }
+                } catch ( Exception e ) {
+                    ULogFile.sharedInstance.LogException( e );
+                }
+            }
+            return false;
+        }
+
+        static void AddRecord( String path, String md5 ) {
+            if ( m_records == null ) {
+                ReadRecordFromFile();
+            }
+            m_records[ path ] = md5;
+        }
+
+        static bool DoesRecordExist( String path, String md5 ) {
+            if ( m_records == null ) {
+                ReadRecordFromFile();
+            }
+            String existMD5 = null;
+            return m_records.TryGetValue( path, out existMD5 ) && String.Equals( existMD5, md5 );
+        }
+
+        static String GetRecord( String path ) {
+            if ( m_records == null ) {
+                ReadRecordFromFile();
+            }
+            String existMD5 = null;
+            m_records.TryGetValue( path, out existMD5 );
+            return existMD5 ?? String.Empty;
+        }
+
+        static bool SaveRecordFile( bool temp = false ) {
+            if ( m_records == null ) {
+                return false;
+            }
+            var path = temp ? GetTempRecordFilePath() : GetRecordFilePath();
+            FileUtils.CreateDirectory( path );
+            var keys = m_records.Keys.ToList();
+            keys.Sort();
+            var root = new JSONObject();
+            for ( int i = 0; i < keys.Count; ++i ) {
+                root.AddField( keys[ i ], m_records[ keys[ i ] ] );
+            }
+            File.WriteAllText( path, root.Print( true ) );
+            return true;
+        }
+
+        static void RemoveTempRecordFile() {
+            try {
+                var path = GetTempRecordFilePath();
+                if ( File.Exists( path ) ) {
+                    File.Delete( path );
+                }
+                path = GetTempRecordFilePath() + ".meta";
+                if ( File.Exists( path ) ) {
+                    File.Delete( path );
+                }
+            } catch ( Exception e ) {
+                ULogFile.sharedInstance.LogException( e );
+            }
+        }
+
+        static bool ClearRecord( String path ) {
+            if ( m_records == null ) {
+                ReadRecordFromFile();
+            }
+            return m_records.Remove( path );
+        }
+
+        static int ClearAllWildAssets() {
+            var count = 0;
+            var path = OutputRoot;
+            if ( Directory.Exists( path ) ) {
+                var files = FileUtils.GetFileList( path, EditorUtils.FileFilter_prefab );
+                for ( int i = 0; i < files.Count; ++i ) {
+                    var dstPath = files[ i ];
+                    var srcPath = dstPath.Replace( OutputRoot, InputRoot );
+                    if ( !File.Exists( srcPath ) ) {
+                        ULogFile.sharedInstance.Log( "Delete wild file: {0}", dstPath );
+                        AssetDatabase.DeleteAsset( dstPath );
+                        ClearRecord( srcPath );
+                        ++count;
+                    }
+                }
+            }
+            return count;
+        }
+
+        static String DumpAnimationClip( AnimationClip clip ) {
+            var sb = StringUtils.newStringBuilder;
+            sb.AppendLine( clip.name );
+            var curveData = AnimationUtility.GetAllCurves( clip, true );
+            for ( int i = 0; i < curveData.Length; ++i ) {
+                var curve = curveData[ i ].curve;
+                var keys = curve.keys;
+                sb.AppendLine( curveData[ i ].type.ToString() );
+                sb.AppendLine( curveData[ i ].propertyName );
+                sb.AppendLine( curveData[ i ].path );
+                sb.AppendLine( curve.preWrapMode.ToString() );
+                sb.AppendLine( curve.postWrapMode.ToString() );
+                sb.AppendLine( keys.Length.ToString() );
+                for ( int j = 0; j < keys.Length; ++j ) {
+                    sb.AppendLine( keys[ j ].time.ToString() );
+                    sb.AppendLine( keys[ j ].value.ToString() );
+                    sb.AppendLine( keys[ j ].inTangent.ToString() );
+                    sb.AppendLine( keys[ j ].outTangent.ToString() );
+                    sb.AppendLine( keys[ j ].tangentMode.ToString() );
+                }
+            }
+            return sb.ToString();
+        }
+
+        static String HashAnimationClip( String path ) {
+            var clip = AssetDatabase.LoadAssetAtPath( path, typeof( AnimationClip ) ) as AnimationClip;
+            if ( clip == null ) {
+                return String.Empty;
+            }
+            try {
+                var str = DumpAnimationClip( clip );
+                return !String.IsNullOrEmpty( str ) ? EditorUtils.Md5String( str ) : String.Empty;
+            } finally {
+                Resources.UnloadAsset( clip );
+            }
+        }
+
+        static void DumpAnimationClipGUI() {
+            var clip = Selection.activeObject as AnimationClip;
+            if ( clip != null ) {
+                var str = DumpAnimationClip( clip );
+                UDebug.Print( str );
+            }
+        }
+
+        public static void ExportAll(
+            List<AnimationClipCompressor.ClipInfo> input,
+            List<AnimationClipCompressor.Arg> args, AnimationClipCompressor.Arg defaultArg = null, bool saveOnly = false ) {
+            int count = 0;
+            int count1 = 0;
+            try {
+                ReadRecordFromFile();
+                count1 = ClearAllWildAssets();
+                RemoveTempRecordFile();
+                var _InputRoot = "^" + InputRoot;
+                var batchSaveRecords = new List<Func<String>>();
+                defaultArg = defaultArg ?? new AnimationClipCompressor.Arg();
+                input = input.Where( _c => _c.selected ).ToList();
+                for ( int i = 0; i < input.Count; ++i ) {
+                    var name = input[ i ].clip.name;
+                    var srcFilePath = input[ i ].path;
+                    if ( srcFilePath.Contains( OutputRoot ) ) {
+                        continue;
+                    }
+                    var dstFilePath = Regex.Replace( srcFilePath, _InputRoot, OutputRoot );
+                    UDebug.Print( "{0} => {1}", srcFilePath, dstFilePath );
+                    if ( EditorUtility.DisplayCancelableProgressBar(
+                        "Backup AnimationClips" + new String( '.', Common.Utils.GetSystemTicksSec() % 3 + 1 ), srcFilePath, ( float )i / input.Count ) ) {
+                        break;
+                    }
+
+                    var arg = ( args != null ? args.Find( n => n.targetName == name ) : null ) ?? defaultArg;
+                    arg.targetName = name;
+                    var sargs = arg.ToString();
+                    var srcHash = HashAnimationClip( srcFilePath );
+                    var dstHash = HashAnimationClip( dstFilePath );
+                    var fullHash = srcHash + " | " + dstHash + " <= " + sargs;
+                    var oldHash = GetRecord( srcFilePath );
+                    if ( oldHash != fullHash ) {
+                        // src animation curve changed, re-backup first
+                        if ( saveOnly == false && !oldHash.StartsWith( srcHash ) ) {
+                            String outBasename;
+                            String outExtention;
+                            String outPath;
+                            StringUtils.SplitFullFilename( dstFilePath, out outBasename, out outExtention, out outPath );
+                            outPath = outPath.Trim( '/' );
+                            if ( !Directory.Exists( outPath ) ) {
+                                FileUtils.CreateDirectory( outPath );
+                                AssetDatabase.Refresh();
+                            }
+                            var dstAsset = AssetDatabase.LoadAssetAtPath( dstFilePath, typeof( AnimationClip ) ) as AnimationClip;
+                            if ( dstAsset != null ) {
+                                Resources.UnloadAsset( dstAsset );
+                                AssetDatabase.DeleteAsset( dstFilePath );
+                                dstAsset = null;
+                                AssetDatabase.Refresh();
+                            }
+                            if ( !AssetDatabase.CopyAsset( srcFilePath, dstFilePath ) ) {
+                                ULogFile.sharedInstance.LogError( "Copy Asset Failed: {0} -> {1}", srcFilePath, dstFilePath );
+                                continue;
+                            }
+                            AssetDatabase.Refresh();
+                        }
+                        try {
+                            if ( saveOnly == false ) {
+                                CurveCompressor.m_positionError = arg.positionError;
+                                CurveCompressor.m_rotationError = arg.rotationError;
+                                CurveCompressor.m_scaleError = arg.scaleError;
+                                CurveCompressor.m_depthScale = arg.depthScale;
+                                CurveCompressor.m_removeScaleCurve = arg.removeScaleCurve;
+                                var srcClip = AssetDatabase.LoadAssetAtPath( srcFilePath, typeof( AnimationClip ) ) as AnimationClip;
+                                var oriClip = AssetDatabase.LoadAssetAtPath( dstFilePath, typeof( AnimationClip ) ) as AnimationClip;
+                                if ( srcClip != null && oriClip != null ) {
+                                    var b = CurveCompressor.TrimAnimationClip( ref srcClip, ref oriClip );
+                                    if ( !b ) {
+                                        ULogFile.sharedInstance.LogError( "Compress Animation Failed: {0}", srcFilePath );
+                                        continue;
+                                    }
+                                    if ( srcClip != null ) {
+                                        Resources.UnloadAsset( srcClip );
+                                    }
+                                    var fi = new FileInfo( srcFilePath );
+                                    if ( fi.Exists ) {
+                                        input[ i ].compressed_size = ( int )fi.Length;
+                                    }
+                                } else {
+                                    continue;
+                                }
+                            }
+                            var _srcFilePath = String.Copy( srcFilePath );
+                            var _dstFilePath = String.Copy( dstFilePath );
+                            var _sargs = String.Copy( sargs );
+                            batchSaveRecords.Add(
+                                () => {
+                                    var _srcHash = HashAnimationClip( _srcFilePath );
+                                    var _dstHash = HashAnimationClip( _dstFilePath );
+                                    var _fullHash = _srcHash + " | " + _dstHash + " <= " + _sargs;
+                                    AddRecord( _srcFilePath, _fullHash );
+                                    return _srcFilePath;
+                                }
+                            );
+                        } catch ( Exception e ) {
+                            ULogFile.sharedInstance.LogException( e );
+                        }
+                    }
+                }
+                if ( batchSaveRecords.Count > 0 ) {
+                    AssetDatabase.Refresh();
+                    AssetDatabase.SaveAssets();
+                    EditorApplication.SaveAssets();
+                    for ( int i = 0; i < batchSaveRecords.Count; ++i ) {
+                        try {
+                            var srcFile = batchSaveRecords[ i ]();
+                            EditorUtility.DisplayProgressBar( "Save" + new String( '.', Common.Utils.GetSystemTicksSec() % 3 + 1 ), srcFile, ( float )i / batchSaveRecords.Count );
+                        } catch ( Exception e ) {
+                            ULogFile.sharedInstance.LogException( e );
+                        }
+                    }
+                }
+                count = batchSaveRecords.Count;
+            } finally {
+                SaveRecordFile();
+                RemoveTempRecordFile();
+                EditorUtility.ClearProgressBar();
+                if ( count > 0 || count1 > 0 ) {
+                    if ( EditorUtility.DisplayDialog( "SVN", String.Format( "Please commit file: \n{0}", GetRecordFilePath() ), "Yes", "No" ) ) {
+                        var path = GetRecordFilePath();
+                        path = Path.GetFullPath( path );
+                        path = path.Replace( '\\', '/' );
+                        UDebug.Print( "TODO: submit to svn: {0}", path );
+                        EditorUtils.BrowseFolder( RecordRoot );
+                    }
+                }
+            }
+        }
+    }
+}
