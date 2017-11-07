@@ -14,18 +14,21 @@ using Common;
 
 namespace AresEditor.ArcReactor.ArtistKit {
 
-    class AnimationClipCompressor : EditorWindow {
+    internal class AnimationClipCompressor : EditorWindow {
 
         internal class Arg {
-            internal String targetName = String.Empty;
-            internal float positionError = 0.01f;
-            internal float rotationError = 0.05f;
-            internal float scaleError = 0.01f;
-            internal float depthScale = 1.125f;
+            internal const float Default_PositionError = 0.01f;
+            internal const float Default_RotationError = 0.05f;
+            internal const float Default_ScaleError = 0.01f;
+            internal const float Default_DepthScale = 1.125f;
+
+            internal float positionError = Default_PositionError;
+            internal float rotationError = Default_RotationError;
+            internal float scaleError = Default_ScaleError;
+            internal float depthScale = Default_DepthScale;
             internal bool removeScaleCurve = false;
             internal Arg Clone() {
                 return new Arg() {
-                    targetName = this.targetName,
                     positionError = this.positionError,
                     rotationError = this.rotationError,
                     scaleError = this.scaleError,
@@ -34,7 +37,6 @@ namespace AresEditor.ArcReactor.ArtistKit {
                 };
             }
             internal void CopyFrom( Arg args ) {
-                targetName = args.targetName;
                 positionError = args.positionError;
                 rotationError = args.rotationError;
                 scaleError = args.scaleError;
@@ -43,33 +45,36 @@ namespace AresEditor.ArcReactor.ArtistKit {
             }
             public override String ToString() {
                 return String.Format(
-                    "{0} : p = {1}, r = {2}, s = {3}, d = {4}, rms = {5}",
-                    targetName,
-                    positionError <= 0 ? "--" : positionError.ToString(),
-                    rotationError <= 0 ? "--" : rotationError.ToString(),
-                    scaleError <= 0 ? "--" : scaleError.ToString(),
+                    "p = {0}, r = {1}, s = {2}, d = {3}, rms = {4}",
+                    positionError.ToString(),
+                    rotationError.ToString(),
+                    scaleError.ToString(),
                     depthScale,
                     removeScaleCurve.ToString().ToLower()
                 );
             }
             public void Reset() {
-                positionError = 0.01f;
-                rotationError = 0.05f;
-                scaleError = 0.01f;
-                depthScale = 1.125f;
+                positionError = Default_PositionError;
+                rotationError = Default_RotationError;
+                scaleError = Default_ScaleError;
+                depthScale = Default_DepthScale;
                 removeScaleCurve = false;
             }
         }
 
         internal class ClipInfo {
             internal bool selected = false;
+            internal bool expand = false;
             internal String title = String.Empty;
             internal String path = String.Empty;
             internal int size = 0;
             internal int compressed_size = -1;
             internal int refCount = 0;
             internal int sizePerSec = 0;
-            AnimationClip _clip = null;
+            internal AnimationClip _clip = null;
+            internal AssetImporter _importer = null;
+            internal String _args = String.Empty;
+            internal Arg _arg = null;
             internal AnimationClip clip {
                 get {
                     if ( _clip == null && !String.IsNullOrEmpty( path ) ) {
@@ -79,6 +84,57 @@ namespace AresEditor.ArcReactor.ArtistKit {
                 }
                 set {
                     _clip = value;
+                }
+            }
+            internal void InitArg() {
+                AssetImporter importer = null;
+                if ( _clip != null ) {
+                    importer = AssetImporter.GetAtPath( AssetDatabase.GetAssetPath( _clip ) );
+                }
+                _arg = null;
+                _args = String.Empty;
+                if ( _importer == null && importer != null ) {
+                    _importer = importer;
+                    if ( !String.IsNullOrEmpty( importer.userData ) ) {
+                        var root = JSONObject.Create( importer.userData );
+                        _arg = new AnimationClipCompressor.Arg();
+                        root.GetField( out _arg.positionError, "p", _arg.positionError );
+                        root.GetField( out _arg.rotationError, "r", _arg.rotationError );
+                        root.GetField( out _arg.scaleError, "s", _arg.scaleError );
+                        root.GetField( out _arg.depthScale, "d", _arg.depthScale );
+                        root.GetField( out _arg.removeScaleCurve, "rms", _arg.removeScaleCurve );
+                        _args = _arg.ToString();
+                    }
+                }
+            }
+            internal void Apply() {
+                if ( _importer != null ) {
+                    var s = _importer.userData;
+                    if ( _arg != null ) {
+                        var root = new JSONObject( JSONObject.Type.OBJECT );
+                        root.SetField( "p", _arg.positionError );
+                        root.SetField( "r", _arg.rotationError );
+                        root.SetField( "s", _arg.scaleError );
+                        root.SetField( "d", _arg.depthScale );
+                        root.SetField( "rms", _arg.removeScaleCurve );
+                        _importer.userData = root.ToString( true );
+                    } else {
+                        _importer.userData = String.Empty;
+                    }
+                    if ( _importer.userData != s ) {
+                        _importer.SaveAndReimport();
+                    }
+                }
+            }
+            internal void Reset() {
+                _arg = null;
+                _args = String.Empty;
+                if ( _importer != null ) {
+                    var s = _importer.userData;
+                    if ( !String.IsNullOrEmpty( s ) ) {
+                        _importer.userData = String.Empty;
+                        _importer.SaveAndReimport();
+                    }
                 }
             }
         }
@@ -92,14 +148,12 @@ namespace AresEditor.ArcReactor.ArtistKit {
         enum SortType {
             Name,
             Size,
-            Rate,
         }
-        static readonly String[] SortOptions = new String[] { "Name", "Size", "Rate" };
+        static readonly String[] SortOptions = new String[] { "Name", "Size" };
 
         const int WarningSize = 1 << 18;
 
         static AnimationClipCompressor m_window = null;
-        static List<Arg> m_args = null;
         static Vector2 m_argsViewPos = Vector2.zero;
         static Vector2 m_clipsViewPos = Vector2.zero;
         static Dictionary<String, ClipInfo> m_selectedAnimationClips = new Dictionary<String, ClipInfo>();
@@ -107,11 +161,10 @@ namespace AresEditor.ArcReactor.ArtistKit {
         static int m_selectedCount = 0;
         static String[] m_animName = null;
         static SortType m_animListSortType = SortType.Name;
-        static int m_nameSel = -1;
-        static Arg m_argEditing = new Arg();
         static Overall m_overall = new Overall();
+        static Arg m_argEditing = new AnimationClipCompressor.Arg();
 
-        [MenuItem( "Tools/AnimationClipCompressor" )]
+        [MenuItem( "Tools/AnimationClip Compressor" )]
         static void Init() {
             if ( m_window == null ) {
                 m_window = EditorWindow.GetWindow<AnimationClipCompressor>( "AnimationClip Compressor", true, typeof( EditorWindow ) );
@@ -194,13 +247,22 @@ namespace AresEditor.ArcReactor.ArtistKit {
                             } else {
                                 outAssetPath = Regex.Replace( assetPath, _InputRoot, AnimationClipCompressImp.OutputRoot );
                             }
+                            ci.path = assetPath;
+                            ci.clip = AssetDatabase.LoadAssetAtPath( assetPath, typeof( AnimationClip ) ) as AnimationClip;
+                            
+#if UNITY_5
+                            var inFile = ci.clip;
+                            var outFile = AssetDatabase.LoadAssetAtPath( outAssetPath, typeof( AnimationClip ) ) as AnimationClip;
+                            ci.size = outFile ? UnityEngine.Profiling.Profiler.GetRuntimeMemorySize( outFile ) : ( inFile ? UnityEngine.Profiling.Profiler.GetRuntimeMemorySize( inFile ) : -1 );
+                            ci.compressed_size = outFile && inFile ? UnityEngine.Profiling.Profiler.GetRuntimeMemorySize( inFile ) : -1;
+#else
                             var inFileInfo = new FileInfo( assetPath );
                             var outFileInfo = new FileInfo( outAssetPath );
-                            ci.path = assetPath;
                             ci.size = outFileInfo.Exists ? ( int )outFileInfo.Length : ( inFileInfo.Exists ? ( int )inFileInfo.Length : -1 );
                             ci.compressed_size = outFileInfo.Exists && inFileInfo.Exists ? ( int )inFileInfo.Length : -1;
-                            ci.clip = AssetDatabase.LoadAssetAtPath( assetPath, typeof( AnimationClip ) ) as AnimationClip;
+#endif
                             ci.sizePerSec = ( int )( ci.size / ci.clip.length );
+                            ci.InitArg();
                             ret.Add( deps[ j ], ci );
                         }
                         ci.refCount++;
@@ -278,20 +340,6 @@ namespace AresEditor.ArcReactor.ArtistKit {
                     }
                 );
                 break;
-            case SortType.Rate:
-                clips.Sort(
-                    ( l, r ) => {
-                        var c = r.sizePerSec.CompareTo( l.sizePerSec );
-                        if ( c == 0 ) {
-                            c = r.size.CompareTo( l.size );
-                            if ( c == 0 ) {
-                                c = l.title.CompareTo( r.title );
-                            }
-                        }
-                        return c;
-                    }
-                );
-                break;
             }
         }
 
@@ -313,18 +361,13 @@ namespace AresEditor.ArcReactor.ArtistKit {
             EditorGUILayout.BeginVertical();
             EditorGUILayout.BeginHorizontal();
             if ( m_selectedAnimationClips.Count == 0 ) {
-                if ( GUILayout.Button( "Select Folders or Assets to Open" ) ) {
+                if ( GUILayout.Button( "Open" ) ) {
                     m_selectedAnimationClips = Scan();
                     m_sortedAnimations = m_selectedAnimationClips.Values.ToList();
                     SortClips( m_sortedAnimations, m_animListSortType );
                     m_animName = TakeAnimNames( m_sortedAnimations );
                     m_selectedCount = 0;
                     m_overall = new Overall();
-                    if ( m_args == null || m_args.Count == 0 ) {
-                        m_args = m_args ?? new List<Arg>();
-                        m_args.Add( m_argEditing.Clone() );
-                        m_args[ 0 ].targetName = "<default>";
-                    }
                     UpdateOverall();
                 }
             } else {
@@ -340,7 +383,7 @@ namespace AresEditor.ArcReactor.ArtistKit {
                 {
                     EditorGUILayout.Separator();
                     EditorGUILayout.BeginVertical();
-                    var type = ( SortType )GUILayout.Toolbar( ( int )m_animListSortType, SortOptions, GUILayout.MaxWidth( 550 ) );
+                    var type = ( SortType )GUILayout.Toolbar( ( int )m_animListSortType, SortOptions, GUILayout.MaxWidth( 500 ) );
                     EditorGUILayout.LabelField(
                         String.Format( "size = {0}, compressed = {1}, saved = {2}",
                             StringUtils.FormatMemorySize( m_overall.totalSize ),
@@ -354,11 +397,11 @@ namespace AresEditor.ArcReactor.ArtistKit {
                         m_animName = TakeAnimNames( m_sortedAnimations );
                     }
                     EditorGUILayout.Separator();
-                    m_clipsViewPos = EditorGUILayout.BeginScrollView( m_clipsViewPos, GUILayout.MaxWidth( 550 ) );
+                    m_clipsViewPos = EditorGUILayout.BeginScrollView( m_clipsViewPos, GUILayout.MaxWidth( 500 ) );
                     {
                         EditorGUILayout.BeginHorizontal();
                         {
-                            EditorGUILayout.BeginVertical();
+                            EditorGUILayout.BeginVertical( GUILayout.MaxWidth( 320 ) );
                             for ( int i = 0; i < m_sortedAnimations.Count; ++i ) {
                                 EditorGUILayout.BeginHorizontal();
                                 var ci = m_sortedAnimations[ i ];
@@ -380,13 +423,43 @@ namespace AresEditor.ArcReactor.ArtistKit {
                                 }
                                 var color = GUI.color;
                                 if ( ci.size > WarningSize ) {
-                                    GUI.color = Color.red;
+                                    GUI.color = Color.yellow;
                                 } else {
                                     GUI.color = Color.white;
                                 }
-                                EditorGUILayout.LabelField( ci.title );
-                                EditorGUILayout.EndHorizontal();
+                                EditorGUILayout.BeginVertical();
+                                var expand = EditorGUILayout.Foldout( ci.expand, ci.title );
+                                if ( ci.expand != expand ) {
+                                    ci.expand = expand;
+                                    m_argEditing = ci._arg != null ? ci._arg.Clone() : new Arg();
+                                    if ( expand ) {
+                                        var curI = i;
+                                        for ( int _i = 0; _i < m_sortedAnimations.Count; ++_i ) {
+                                            if ( curI != _i ) {
+                                                var _ci = m_sortedAnimations[ _i ];
+                                                _ci.expand = false;
+                                            }
+                                        }
+                                    }
+                                }
                                 GUI.color = color;
+                                if ( ci.expand ) {
+                                    EditorGUILayout.BeginHorizontal();
+                                    if ( GUILayout.Button( "Apply", GUILayout.Width( 50 ) ) ) {
+                                        ci._arg = m_argEditing.Clone();
+                                        ci._args = ci._arg.ToString();
+                                        ci.Apply();
+                                    }
+                                    GUI.enabled = ci._arg != null;
+                                    if ( GUILayout.Button( "Reset", GUILayout.Width( 50 ) ) ) {
+                                        ci.Reset();
+                                    }
+                                    GUI.enabled = true;
+                                    EditorGUILayout.LabelField( String.IsNullOrEmpty( ci._args ) ? "default" : ci._args );
+                                    EditorGUILayout.EndHorizontal();
+                                }
+                                EditorGUILayout.EndVertical();
+                                EditorGUILayout.EndHorizontal();
                             }
                             EditorGUILayout.EndVertical();
 
@@ -395,16 +468,10 @@ namespace AresEditor.ArcReactor.ArtistKit {
                             EditorGUILayout.BeginVertical();
                             for ( int i = 0; i < m_sortedAnimations.Count; ++i ) {
                                 var ci = m_sortedAnimations[ i ];
-                                EditorGUILayout.LabelField( String.Format( "size = {0} / {1}", StringUtils.FormatMemorySize( ci.size ), ci.compressed_size > 0 ? StringUtils.FormatMemorySize( ci.compressed_size ) : "--" ) );
-                            }
-                            EditorGUILayout.EndVertical();
-
-                            EditorGUILayout.Separator();
-
-                            EditorGUILayout.BeginVertical();
-                            for ( int i = 0; i < m_sortedAnimations.Count; ++i ) {
-                                var ci = m_sortedAnimations[ i ];
-                                EditorGUILayout.LabelField( String.Format( "rate = {0}/sec", StringUtils.FormatMemorySize( ci.sizePerSec ) ) );
+                                EditorGUILayout.LabelField( String.Format( "{0} / {1}", StringUtils.FormatMemorySize( ci.size ), ci.compressed_size > 0 ? StringUtils.FormatMemorySize( ci.compressed_size ) : "--" ) );
+                                if ( ci.expand ) {
+                                    EditorGUILayout.LabelField( String.Empty );
+                                }
                             }
                             EditorGUILayout.EndVertical();
                         }
@@ -417,95 +484,102 @@ namespace AresEditor.ArcReactor.ArtistKit {
                 EditorGUILayout.Separator();
                 {
                     EditorGUILayout.BeginVertical();
-                    EditorGUILayout.Separator();
-                    if ( m_animName != null && m_animName.Length > 0 ) {
-                        var oldSel = m_nameSel;
-                        m_nameSel = m_nameSel < 0 ? 0 : m_nameSel;
-                        var newSel = EditorGUILayout.Popup( "Clip Name:", m_nameSel, m_animName );
-                        if ( newSel != m_nameSel || oldSel != newSel ) {
-                            m_nameSel = newSel;
-                            if ( m_animName != null && m_nameSel >= 0 ) {
-                                m_argEditing.targetName = m_animName[ m_nameSel ];
-                            } else {
-                                m_argEditing.targetName = String.Empty;
+                    for ( int i = 0; i < m_sortedAnimations.Count; ++i ) {
+                        var ci = m_sortedAnimations[ i ];
+                        if ( ci.expand ) {
+                            {
+                                var color = GUI.color;
+                                var args = String.Empty;
+                                EditorGUILayout.BeginVertical();
+                                {
+                                    EditorGUILayout.BeginHorizontal();
+                                    GUI.color = m_argEditing.positionError > 0 ? Color.white : Color.gray;
+                                    m_argEditing.positionError = EditorGUILayout.FloatField( "Position Error:", m_argEditing.positionError );
+                                    m_argEditing.positionError = Mathf.Clamp( m_argEditing.positionError, 0, 1 );
+                                    if ( GUILayout.Button( "R", GUILayout.Width( 20 ) ) ) {
+                                        m_argEditing.positionError = Arg.Default_PositionError;
+                                        Repaint();
+                                    }
+                                    EditorGUILayout.EndHorizontal();
+                                    
+                                    EditorGUILayout.BeginHorizontal();
+                                    GUI.color = m_argEditing.rotationError > 0 ? Color.white : Color.gray;
+                                    m_argEditing.rotationError = EditorGUILayout.FloatField( "Rotation Error:", m_argEditing.rotationError );
+                                    m_argEditing.rotationError = Mathf.Clamp( m_argEditing.rotationError, 0, 1 );
+                                    if ( GUILayout.Button( "R", GUILayout.Width( 20 ) ) ) {
+                                        m_argEditing.rotationError = Arg.Default_RotationError;
+                                        Repaint();
+                                    }
+                                    EditorGUILayout.EndHorizontal();
+
+                                    EditorGUILayout.BeginHorizontal();
+                                    GUI.color = m_argEditing.scaleError > 0 ? Color.white : Color.gray;
+                                    m_argEditing.scaleError = EditorGUILayout.FloatField( "Scale Error:", m_argEditing.scaleError );
+                                    m_argEditing.scaleError = Mathf.Clamp( m_argEditing.scaleError, 0, 1 );
+                                    if ( GUILayout.Button( "R", GUILayout.Width( 20 ) ) ) {
+                                        m_argEditing.scaleError = Arg.Default_ScaleError;
+                                        Repaint();
+                                    }
+                                    EditorGUILayout.EndHorizontal();
+
+                                    EditorGUILayout.BeginHorizontal();
+                                    GUI.color = color;
+                                    m_argEditing.depthScale = EditorGUILayout.FloatField( "Depth Scale:", m_argEditing.depthScale );
+                                    m_argEditing.depthScale = Math.Max( m_argEditing.depthScale, 1 );
+                                    m_argEditing.depthScale = Mathf.Clamp( m_argEditing.depthScale, 1, 2 );
+                                    if ( GUILayout.Button( "R", GUILayout.Width( 20 ) ) ) {
+                                        m_argEditing.depthScale = Arg.Default_DepthScale;
+                                        Repaint();
+                                    }
+                                    EditorGUILayout.EndHorizontal();
+
+                                    m_argEditing.removeScaleCurve = EditorGUILayout.Toggle( "Remove Scale Curve", m_argEditing.removeScaleCurve );
+                                    args = m_argEditing.ToString();
+                                    EditorGUILayout.BeginVertical();
+                                    EditorGUILayout.BeginHorizontal();
+                                    if ( GUILayout.Button( "Apply Selected" ) ) {
+                                        for ( int j = 0; j < m_sortedAnimations.Count; ++j ) {
+                                            if ( m_sortedAnimations[ j ].selected ) {
+                                                m_sortedAnimations[ j ]._arg = m_argEditing.Clone();
+                                                m_sortedAnimations[ j ]._args = args;
+                                                m_sortedAnimations[ j ].Apply();
+                                            }
+                                        }
+                                    }
+                                    if ( GUILayout.Button( "Apply All" ) ) {
+                                        for ( int j = 0; j < m_sortedAnimations.Count; ++j ) {
+                                            m_sortedAnimations[ j ]._arg = m_argEditing.Clone();
+                                            m_sortedAnimations[ j ]._args = args;
+                                            m_sortedAnimations[ j ].Apply();
+                                        }
+                                    }
+                                    EditorGUILayout.EndHorizontal();
+                                    EditorGUILayout.BeginHorizontal();
+                                    if ( GUILayout.Button( "Reset Selected" ) ) {
+                                        for ( int j = 0; j < m_sortedAnimations.Count; ++j ) {
+                                            if ( m_sortedAnimations[ j ].selected ) {
+                                                m_sortedAnimations[ j ].Reset();
+                                            }
+                                        }
+                                    }
+                                    if ( GUILayout.Button( "Reset All" ) ) {
+                                        for ( int j = 0; j < m_sortedAnimations.Count; ++j ) {
+                                            m_sortedAnimations[ j ].Reset();
+                                        }
+                                    }
+                                    EditorGUILayout.EndHorizontal();
+                                    EditorGUILayout.EndVertical();
+                                }
+                                EditorGUILayout.EndVertical();
                             }
+                            break;
                         }
-                    }
-                    var newName = EditorGUILayout.TextField( "", m_argEditing.targetName );
-                    if ( newName != m_argEditing.targetName ) {
-                        var sel = Array.IndexOf( m_animName, newName );
-                        if ( sel != -1 ) {
-                            m_nameSel = sel;
-                            m_argEditing.targetName = newName;
-                        }
-                    }
-                    var color = GUI.color;
-                    GUI.color = m_argEditing.positionError > 0 ? Color.white : Color.gray;
-                    m_argEditing.positionError = EditorGUILayout.FloatField( "Position Error:", m_argEditing.positionError );
-                    m_argEditing.positionError = Mathf.Clamp( m_argEditing.positionError, 0, 1 );
-                    GUI.color = m_argEditing.rotationError > 0 ? Color.white : Color.gray;
-                    m_argEditing.rotationError = EditorGUILayout.FloatField( "Rotation Error:", m_argEditing.rotationError );
-                    m_argEditing.rotationError = Mathf.Clamp( m_argEditing.rotationError, 0, 1 );
-                    GUI.color = m_argEditing.scaleError > 0 ? Color.white : Color.gray;
-                    m_argEditing.scaleError = EditorGUILayout.FloatField( "Scale Error:", m_argEditing.scaleError );
-                    m_argEditing.scaleError = Mathf.Clamp( m_argEditing.scaleError, 0, 1 );
-                    GUI.color = color;
-                    m_argEditing.depthScale = EditorGUILayout.FloatField( "Depth Scale:", m_argEditing.depthScale );
-                    m_argEditing.depthScale = Math.Max( m_argEditing.depthScale, 1 );
-                    m_argEditing.depthScale = Mathf.Clamp( m_argEditing.depthScale, 1, 2 );
-                    m_argEditing.removeScaleCurve = EditorGUILayout.Toggle( "Remove Scale Curve", m_argEditing.removeScaleCurve );
-                    EditorGUILayout.BeginHorizontal();
-                    if ( GUILayout.Button( "Add" ) ) {
-                        m_args = m_args ?? new List<Arg>();
-                        if ( m_animName != null && m_nameSel >= 0 ) {
-                            m_argEditing.targetName = m_animName[ m_nameSel ];
-                        } else {
-                            m_argEditing.targetName = String.Empty;
-                        }
-                        var name = m_argEditing.targetName ?? String.Empty;
-                        name = name.Trim();
-                        if ( !String.IsNullOrEmpty( name ) ) {
-                            m_argEditing.targetName = name;
-                            var exists = m_args.Find( n => n.targetName == m_argEditing.targetName );
-                            if ( exists == null ) {
-                                m_args.Add( m_argEditing.Clone() );
-                                m_args.Sort( ( l, r ) => l.targetName.CompareTo( r.targetName ) );
-                            } else {
-                                exists.CopyFrom( m_argEditing );
-                            }
-                        }
-                    }
-                    if ( GUILayout.Button( "Reset", GUILayout.MaxWidth( 60 ) ) ) {
-                        m_argEditing.Reset();
-                        GUI.FocusControl( "Add" );
-                    }
-                    EditorGUILayout.EndHorizontal();
-                    if ( m_args != null ) {
-                        EditorGUILayout.BeginVertical();
-                        m_argsViewPos = EditorGUILayout.BeginScrollView( m_argsViewPos, GUILayout.Width( 360 ) );
-                        var remove = -1;
-                        for ( int i = 0; i < m_args.Count; ++i ) {
-                            EditorGUILayout.BeginHorizontal();
-                            if ( GUILayout.Button( "-", GUILayout.Width( 20 ) ) ) {
-                                remove = i;
-                            }
-                            EditorGUILayout.LabelField( m_args[ i ].ToString(), GUILayout.MinWidth( 320 ) );
-                            EditorGUILayout.EndHorizontal();
-                        }
-                        if ( remove != -1 ) {
-                            m_args.RemoveAt( remove );
-                        }
-                        EditorGUILayout.EndScrollView();
-                        EditorGUILayout.EndVertical();
                     }
                     EditorGUILayout.Separator();
                     if ( GUILayout.Button( "<< Compress >>" ) ) {
                         DoCompress();
                         UpdateOverall();
                     }
-                    //if ( GUILayout.Button( "<< Save >>" ) ) {
-                    //    SaveOnly();
-                    //}
                     EditorGUILayout.HelpBox( String.Format( "Total AnimationClip Count: {0}, Selected: {1}", m_sortedAnimations != null ? m_sortedAnimations.Count : 0, m_selectedCount ), MessageType.Info );
                     EditorGUILayout.Separator();
                     EditorGUILayout.EndVertical();
@@ -518,13 +592,13 @@ namespace AresEditor.ArcReactor.ArtistKit {
 
         static void DoCompress() {
             if ( m_sortedAnimations != null ) {
-                AnimationClipCompressImp.ExportAll( m_sortedAnimations, m_args, m_argEditing );
+                AnimationClipCompressImp.ExportAll( m_sortedAnimations );
             }
         }
 
         static void SaveOnly() {
             if ( m_sortedAnimations != null ) {
-                AnimationClipCompressImp.ExportAll( m_sortedAnimations, m_args, m_argEditing, true );
+                AnimationClipCompressImp.ExportAll( m_sortedAnimations, true );
             }
         }
     }
@@ -537,7 +611,7 @@ namespace AresEditor.ArcReactor.ArtistKit {
         }
 
         static private int Levenshtein_Distance( string str1, string str2 ) {
-            int[, ] Matrix;
+            int[ , ] Matrix;
             int n = str1.Length;
             int m = str2.Length;
             int temp = 0;
@@ -1039,8 +1113,7 @@ namespace AresEditor.ArcReactor.ArtistKit {
         }
 
         public static void ExportAll(
-            List<AnimationClipCompressor.ClipInfo> input,
-            List<AnimationClipCompressor.Arg> args, AnimationClipCompressor.Arg defaultArg = null, bool saveOnly = false ) {
+            List<AnimationClipCompressor.ClipInfo> input, bool saveOnly = false ) {
             int count = 0;
             int count1 = 0;
             try {
@@ -1049,10 +1122,11 @@ namespace AresEditor.ArcReactor.ArtistKit {
                 RemoveTempRecordFile();
                 var _InputRoot = "^" + InputRoot;
                 var batchSaveRecords = new List<Func<String>>();
-                defaultArg = defaultArg ?? new AnimationClipCompressor.Arg();
+                var defaultArg = new AnimationClipCompressor.Arg();
                 input = input.Where( _c => _c.selected ).ToList();
                 for ( int i = 0; i < input.Count; ++i ) {
                     var name = input[ i ].clip.name;
+                    var arg = input[ i ]._arg ?? defaultArg;
                     var srcFilePath = input[ i ].path;
                     if ( srcFilePath.Contains( OutputRoot ) ) {
                         continue;
@@ -1063,13 +1137,9 @@ namespace AresEditor.ArcReactor.ArtistKit {
                         "Backup AnimationClips" + new String( '.', Common.Utils.GetSystemTicksSec() % 3 + 1 ), srcFilePath, ( float )i / input.Count ) ) {
                         break;
                     }
-
-                    var arg = ( args != null ? args.Find( n => n.targetName == name ) : null ) ?? defaultArg;
-                    arg.targetName = name;
-                    var sargs = arg.ToString();
                     var srcHash = HashAnimationClip( srcFilePath );
                     var dstHash = HashAnimationClip( dstFilePath );
-                    var fullHash = srcHash + " | " + dstHash + " <= " + sargs;
+                    var fullHash = srcHash + " | " + dstHash + " : " + arg.ToString();
                     var oldHash = GetRecord( srcFilePath );
                     if ( oldHash != fullHash ) {
                         // src animation curve changed, re-backup first
@@ -1124,12 +1194,11 @@ namespace AresEditor.ArcReactor.ArtistKit {
                             }
                             var _srcFilePath = String.Copy( srcFilePath );
                             var _dstFilePath = String.Copy( dstFilePath );
-                            var _sargs = String.Copy( sargs );
                             batchSaveRecords.Add(
                                 () => {
                                     var _srcHash = HashAnimationClip( _srcFilePath );
                                     var _dstHash = HashAnimationClip( _dstFilePath );
-                                    var _fullHash = _srcHash + " | " + _dstHash + " <= " + _sargs;
+                                    var _fullHash = _srcHash + " | " + _dstHash + " : " + arg.ToString();
                                     AddRecord( _srcFilePath, _fullHash );
                                     return _srcFilePath;
                                 }
@@ -1142,7 +1211,6 @@ namespace AresEditor.ArcReactor.ArtistKit {
                 if ( batchSaveRecords.Count > 0 ) {
                     AssetDatabase.Refresh();
                     AssetDatabase.SaveAssets();
-                    EditorApplication.SaveAssets();
                     for ( int i = 0; i < batchSaveRecords.Count; ++i ) {
                         try {
                             var srcFile = batchSaveRecords[ i ]();
@@ -1158,15 +1226,203 @@ namespace AresEditor.ArcReactor.ArtistKit {
                 RemoveTempRecordFile();
                 EditorUtility.ClearProgressBar();
                 if ( count > 0 || count1 > 0 ) {
-                    if ( EditorUtility.DisplayDialog( "SVN", String.Format( "Please commit file: \n{0}", GetRecordFilePath() ), "Yes", "No" ) ) {
-                        var path = GetRecordFilePath();
-                        path = Path.GetFullPath( path );
-                        path = path.Replace( '\\', '/' );
-                        UDebug.Print( "TODO: submit to svn: {0}", path );
-                        EditorUtils.BrowseFolder( RecordRoot );
+                    EditorUtils.BrowseFolder( RecordRoot );
+                }
+            }
+        }
+    }
+
+    internal class AnimationClipCompressorArgEditor : EditorWindow {
+
+        class ClipInfo {
+            internal AnimationClipCompressor.Arg arg;
+            internal AnimationClip clip;
+            internal AssetImporter importer;
+            internal String args = String.Empty;
+
+            internal void Apply() {
+                if ( importer != null ) {
+                    var s = importer.userData;
+                    if ( arg != null ) {
+                        var root = new JSONObject( JSONObject.Type.OBJECT );
+                        root.SetField( "p", arg.positionError );
+                        root.SetField( "r", arg.rotationError );
+                        root.SetField( "s", arg.scaleError );
+                        root.SetField( "d", arg.depthScale );
+                        root.SetField( "rms", arg.removeScaleCurve );
+                        importer.userData = root.ToString( true );
+                    } else {
+                        importer.userData = String.Empty;
+                    }
+                    if ( importer.userData != s ) {
+                        importer.SaveAndReimport();
+                    }
+                }
+            }
+            internal void Reset() {
+                arg = null;
+                args = String.Empty;
+                if ( importer != null ) {
+                    var s = importer.userData;
+                    if ( !String.IsNullOrEmpty( s ) ) {
+                        importer.userData = String.Empty;
+                        importer.SaveAndReimport();
                     }
                 }
             }
         }
+
+        static AnimationClipCompressorArgEditor m_window = null;
+        static List<ClipInfo> m_selections = null;
+        static AnimationClipCompressor.Arg m_argEditing = new AnimationClipCompressor.Arg();
+        static Vector2 m_scrollViewPos = Vector2.zero;
+
+        static void Init() {
+            if ( m_window == null ) {
+                m_window = ( AnimationClipCompressorArgEditor )EditorWindow.GetWindow( typeof( AnimationClipCompressorArgEditor ), false, "AnimationClip Compressor Arg Editor" );
+                Selection.selectionChanged += OnSelectionChanged;
+            }
+        }
+
+        void OnDestroy() {
+            m_window = null;
+            Selection.selectionChanged -= OnSelectionChanged;
+        }
+
+        static void OnSelectionChanged() {
+            if ( m_window != null ) {
+                var objs = Selection.objects;
+                m_selections = m_selections ?? new List<ClipInfo>();
+                m_selections.Clear();
+                for ( int i = 0; i < objs.Length; ++i ) {
+                    if ( objs[ i ].GetType() == typeof( AnimationClip ) ) {
+                        var path = AssetDatabase.GetAssetPath( objs[ i ] );
+                        if ( !String.IsNullOrEmpty( path ) ) {
+                            var clip = objs[ i ] as AnimationClip;
+                            if ( clip != null ) {
+                                var clipInfo = new ClipInfo();
+                                clipInfo.clip = clip;
+                                clipInfo.arg = null;
+                                clipInfo.args = String.Empty;
+                                var importer = AssetImporter.GetAtPath( path );
+                                if ( importer != null ) {
+                                    clipInfo.importer = importer;
+                                    if ( !String.IsNullOrEmpty( importer.userData ) ) {
+                                        try {
+                                            var root = JSONObject.Create( importer.userData );
+                                            clipInfo.arg = new AnimationClipCompressor.Arg();
+                                            root.GetField( out clipInfo.arg.positionError, "p", clipInfo.arg.positionError );
+                                            root.GetField( out clipInfo.arg.rotationError, "r", clipInfo.arg.rotationError );
+                                            root.GetField( out clipInfo.arg.scaleError, "s", clipInfo.arg.scaleError );
+                                            root.GetField( out clipInfo.arg.depthScale, "d", clipInfo.arg.depthScale );
+                                            root.GetField( out clipInfo.arg.removeScaleCurve, "rms", clipInfo.arg.removeScaleCurve );
+                                        } catch ( Exception e ) {
+                                            UDebug.LogException( e );
+                                        }
+                                    }
+                                    if ( clipInfo.arg != null ) {
+                                        clipInfo.args = clipInfo.arg.ToString();
+                                    }
+                                    m_selections.Add( clipInfo );
+                                }
+                            }
+                        }
+                    }
+                }
+                if ( m_selections.Count > 0 ) {
+                    m_argEditing = new AnimationClipCompressor.Arg();
+                    for ( int i = 0; i < m_selections.Count; ++i ) {
+                        var info = m_selections[ i ];
+                        if ( info.arg != null ) {
+                            m_argEditing.positionError = info.arg.positionError;
+                            m_argEditing.rotationError = info.arg.rotationError;
+                            m_argEditing.scaleError = info.arg.scaleError;
+                            m_argEditing.depthScale = info.arg.depthScale;
+                            m_argEditing.removeScaleCurve = info.arg.removeScaleCurve;
+                            break;
+                        }
+                    }
+                }
+                m_window.Repaint();
+            } else {
+                Selection.selectionChanged -= OnSelectionChanged;
+            }
+        }
+
+        class GUIChangeColor : IDisposable {
+            public GUIChangeColor( Color newColor ) {
+                this.PreviousColor = GUI.color;
+                GUI.color = newColor;
+            }
+            public void Dispose() {
+                GUI.color = this.PreviousColor;
+            }
+            [SerializeField]
+            private Color PreviousColor { get; set; }
+        }
+
+        void OnGUI() {
+            EditorGUILayout.BeginVertical();
+            if ( m_selections != null && m_selections.Count > 0 ) {
+                var color = GUI.color;
+                var args = String.Empty;
+                EditorGUILayout.BeginVertical();
+                {
+                    GUI.color = m_argEditing.positionError > 0 ? Color.white : Color.gray;
+                    m_argEditing.positionError = EditorGUILayout.FloatField( "Position Error:", m_argEditing.positionError );
+                    m_argEditing.positionError = Mathf.Clamp( m_argEditing.positionError, 0, 1 );
+                    GUI.color = m_argEditing.rotationError > 0 ? Color.white : Color.gray;
+                    m_argEditing.rotationError = EditorGUILayout.FloatField( "Rotation Error:", m_argEditing.rotationError );
+                    m_argEditing.rotationError = Mathf.Clamp( m_argEditing.rotationError, 0, 1 );
+                    GUI.color = m_argEditing.scaleError > 0 ? Color.white : Color.gray;
+                    m_argEditing.scaleError = EditorGUILayout.FloatField( "Scale Error:", m_argEditing.scaleError );
+                    m_argEditing.scaleError = Mathf.Clamp( m_argEditing.scaleError, 0, 1 );
+                    GUI.color = color;
+                    m_argEditing.depthScale = EditorGUILayout.FloatField( "Depth Scale:", m_argEditing.depthScale );
+                    m_argEditing.depthScale = Math.Max( m_argEditing.depthScale, 1 );
+                    m_argEditing.depthScale = Mathf.Clamp( m_argEditing.depthScale, 1, 2 );
+                    m_argEditing.removeScaleCurve = EditorGUILayout.Toggle( "Remove Scale Curve", m_argEditing.removeScaleCurve );
+                    args = m_argEditing.ToString();
+                    if ( GUILayout.Button( "Apply All" ) ) {
+                        for ( int i = 0; i < m_selections.Count; ++i ) {
+                            m_selections[ i ].arg = m_argEditing.Clone();
+                            m_selections[ i ].args = args;
+                            m_selections[ i ].Apply();
+                        }
+                    }
+                    if ( GUILayout.Button( "Reset All" ) ) {
+                        for ( int i = 0; i < m_selections.Count; ++i ) {
+                            m_selections[ i ].arg = null;
+                            m_selections[ i ].args = String.Empty;
+                            m_selections[ i ].Reset();
+                        }
+                    }
+                }
+                EditorGUILayout.EndVertical();
+                EditorGUILayout.Space();
+                EditorGUILayout.BeginVertical();
+                m_scrollViewPos = EditorGUILayout.BeginScrollView( m_scrollViewPos );
+                for ( int i = 0; i < m_selections.Count; ++i ) {
+                    EditorGUILayout.BeginHorizontal();
+                    var clipInfo = m_selections[ i ];
+                    using ( new GUIChangeColor( clipInfo.args == args ? Color.white : Color.red ) ) {
+                        EditorGUILayout.ObjectField( clipInfo.clip.name, clipInfo.clip, typeof( AnimationClip ), false );
+                    }
+                    if ( GUILayout.Button( "Apply", GUILayout.Width( 60 ) ) ) {
+                        clipInfo.arg = m_argEditing.Clone();
+                        clipInfo.args = m_argEditing.ToString();
+                        clipInfo.Apply();
+                    }
+                    if ( GUILayout.Button( "Reset", GUILayout.Width( 60 ) ) ) {
+                        clipInfo.Reset();
+                    }
+                    EditorGUILayout.EndHorizontal();
+                }
+                EditorGUILayout.EndScrollView();
+                EditorGUILayout.EndVertical();
+            }
+            EditorGUILayout.EndVertical();
+        }
+
     }
 }
