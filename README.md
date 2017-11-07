@@ -15,7 +15,5 @@ Unity's Notation | Memory Layout
 ![image](https://github.com/lujian101/UnityToolDist/blob/master/ScreenShot/matrix-viewer.png?raw=true) | ![image](https://github.com/lujian101/UnityToolDist/blob/master/ScreenShot/matrix-viewer-memory.png?raw=true)
 
 
-![image](https://github.com/lujian101/UnityToolDist/blob/master/ScreenShot/matrix-viewer.png?raw=true)
-
 ### MonoScript SerializedField Viewer
 ![image](https://github.com/lujian101/UnityToolDist/blob/master/ScreenShot/mono-script-viewer.png?raw=true)
