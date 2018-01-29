@@ -192,10 +192,10 @@ namespace AresEditor.ArtistKit {
                                 for ( int j = 0; j < _litmapUVs.Count; ++j ) {
                                     var uv = _litmapUVs[ j ];
                                     if ( uv.Key == i ) {
-                                        var a = x + uv.Value.x * t_width;
-                                        var b = y + uv.Value.y * t_height;
-                                        var c = ( uv.Value.z - uv.Value.x ) * t_width;
-                                        var d = ( uv.Value.w - uv.Value.y ) * t_height;
+                                        var a = Mathf.FloorToInt( x + uv.Value.x * t_width );
+                                        var b = Mathf.FloorToInt( y + uv.Value.y * t_height );
+                                        var c = Mathf.CeilToInt( ( uv.Value.z - uv.Value.x ) * t_width );
+                                        var d = Mathf.CeilToInt( ( uv.Value.w - uv.Value.y ) * t_height );
                                         var color = Color.red;
                                         var _color = GUI.color;
                                         var rect = new Rect( a, b, c, d );
@@ -205,9 +205,9 @@ namespace AresEditor.ArtistKit {
                                         color.a = 1.0f;
                                         GUI.color = color;
                                         EditorGUI.DrawRect( new Rect( a - 1, b - 1, c + 2, 1 ), color );
-                                        EditorGUI.DrawRect( new Rect( a - 1, b - 1, 1, d + 2 ), color );
-                                        EditorGUI.DrawRect( new Rect( a, b + d, c + 1, 1 ), color );
-                                        EditorGUI.DrawRect( new Rect( a + c, b, 1, d + 1 ), color );
+                                        EditorGUI.DrawRect( new Rect( a - 1, b, 1, d ), color );
+                                        EditorGUI.DrawRect( new Rect( a - 1, b + d, c + 2, 1 ), color );
+                                        EditorGUI.DrawRect( new Rect( a + c, b, 1, d ), color );
                                         GUI.color = _color;
                                     }
                                 }

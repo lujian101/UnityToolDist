@@ -12,7 +12,7 @@ using Common;
 
 #pragma warning disable 0618
 
-namespace AresEditor.ArcReactor.ArtistKit {
+namespace AresEditor.ArtistKit {
 
     internal class AnimationClipCompressor : EditorWindow {
 

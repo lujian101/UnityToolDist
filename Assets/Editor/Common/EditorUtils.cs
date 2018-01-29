@@ -11,7 +11,7 @@ using System.Linq;
 using System.Reflection;
 using Common;
 
-namespace AresEditor.ArcReactor {
+namespace AresEditor.ArtistKit {
 
     public static class EditorUtils {
 
