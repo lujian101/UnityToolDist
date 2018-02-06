@@ -128,6 +128,7 @@ namespace AresEditor.ArtistKit {
         static Vector2[] GetMeshUV2( Mesh mesh ) {
             Vector2[] ret = null;
             var assetPath = AssetDatabase.GetAssetPath( mesh );
+            assetPath += mesh.GetInstanceID().ToString();
             if ( !String.IsNullOrEmpty( assetPath ) ) {
                 if ( _MeshUVsCache.TryGetValue( assetPath, out ret ) ) {
                     return ret;
@@ -139,6 +140,9 @@ namespace AresEditor.ArtistKit {
                             ti.isReadable = true;
                             AssetDatabase.ImportAsset( assetPath );
                             ret = mesh.uv2;
+                            if ( ret.Length == 0 ) {
+                                ret = mesh.uv;
+                            }
                         } finally {
                             ti.isReadable = false;
                             AssetDatabase.ImportAsset( assetPath );
@@ -146,6 +150,9 @@ namespace AresEditor.ArtistKit {
                     }
                 } else {
                     ret = mesh.uv2;
+                    if ( ret.Length == 0 ) {
+                        ret = mesh.uv;
+                    }
                 }
                 _MeshUVsCache[ assetPath ] = ret;
             }
@@ -192,10 +199,11 @@ namespace AresEditor.ArtistKit {
                                 for ( int j = 0; j < _litmapUVs.Count; ++j ) {
                                     var uv = _litmapUVs[ j ];
                                     if ( uv.Key == i ) {
-                                        var a = Mathf.FloorToInt( x + uv.Value.x * t_width );
-                                        var b = Mathf.FloorToInt( y + uv.Value.y * t_height );
-                                        var c = Mathf.CeilToInt( ( uv.Value.z - uv.Value.x ) * t_width );
-                                        var d = Mathf.CeilToInt( ( uv.Value.w - uv.Value.y ) * t_height );
+                                        var bounds = uv.Value;
+                                        var a = Mathf.FloorToInt( x + bounds.x * t_width );
+                                        var b = Mathf.FloorToInt( y + bounds.y * t_height );
+                                        var c = Mathf.CeilToInt( ( bounds.z - bounds.x ) * t_width );
+                                        var d = Mathf.CeilToInt( ( bounds.w - bounds.y ) * t_height );
                                         var color = Color.red;
                                         var _color = GUI.color;
                                         var rect = new Rect( a, b, c, d );

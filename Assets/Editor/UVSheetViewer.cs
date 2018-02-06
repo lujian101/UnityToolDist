@@ -75,6 +75,9 @@ namespace AresEditor.ArtistKit {
 
         void OnDisable() {
             Selection.selectionChanged -= OnSelectionChanged;
+            if ( m_MeshUVCache != null ) {
+                m_MeshUVCache.Clear();
+            }
         }
 
         void OnSelectionChanged() {
@@ -89,11 +92,16 @@ namespace AresEditor.ArtistKit {
         static String GetMeshAssetHash( String path, Mesh mesh ) {
             var assets = AssetDatabase.LoadAllAssetRepresentationsAtPath( path );
             var index = Array.IndexOf( assets, mesh );
-            if ( path.EndsWith( ".asset" ) ) {
+            if ( path.EndsWith( ".asset" ) || assets.Length == 0 ) {
                 index = 0;
+            } else {
+                UDebug.Assert( index >= 0 );
             }
-            UDebug.Assert( index >= 0 );
-            return String.Format( "{0}-{1}", EditorUtils.Md5Asset( path ), index );
+            if ( File.Exists( path ) ) {
+                return String.Format( "{0}-{1}", EditorUtils.Md5Asset( path ), index );
+            } else {
+                return String.Format( "{0}-{1}", path, mesh.GetInstanceID() );
+            }
         }
 
         static UVData GetMeshUVData( Mesh mesh ) {
@@ -295,14 +303,25 @@ namespace AresEditor.ArtistKit {
                 EditorGUILayout.EndVertical();
             }
         }
-
-        public static float ClampRepeatUV( float value, ref bool modified ) {
-            var _value = value % 1.0f;
-            if ( _value < 0.0 ) {
-                _value += 1.0f;
+        
+        static float ClampRepeatUV( float value, ref bool modified ) {
+            if ( Mathf.Abs( value ) < 1e-6f ) {
+                value = 0;
             }
-            modified = _value != value;
-            return _value;
+            if ( Mathf.Abs( 1 - value ) < 1e-6f ) {
+                value = 1;
+            }
+            if ( value < 0 || value > 1 ) {
+                var _value = value % 1.0f;
+                if ( _value < 0.0 ) {
+                    _value += 1.0f;
+                }
+                modified = _value != value;
+                return _value;
+            } else {
+                modified = false;
+                return value;
+            }
         }
 
         bool DrawSheet( Rect rect, UVData uvset, bool withBG = false, Texture2D tex = null ) {
