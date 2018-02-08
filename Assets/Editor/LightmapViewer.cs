@@ -128,24 +128,31 @@ namespace AresEditor.ArtistKit {
         static Vector2[] GetMeshUV2( Mesh mesh ) {
             Vector2[] ret = null;
             var assetPath = AssetDatabase.GetAssetPath( mesh );
-            assetPath += mesh.GetInstanceID().ToString();
+            var ti = AssetImporter.GetAtPath( assetPath ) as ModelImporter;
+            var id = String.Format( "{0}, {1}", assetPath, mesh.GetInstanceID() );
             if ( !String.IsNullOrEmpty( assetPath ) ) {
-                if ( _MeshUVsCache.TryGetValue( assetPath, out ret ) ) {
+                if ( _MeshUVsCache.TryGetValue( id, out ret ) && ret != null ) {
                     return ret;
                 }
                 if ( mesh.isReadable == false ) {
-                    var ti = AssetImporter.GetAtPath( assetPath ) as ModelImporter;
-                    if ( ti != null && !ti.isReadable ) {
-                        try {
-                            ti.isReadable = true;
-                            AssetDatabase.ImportAsset( assetPath );
+                    if ( ti != null ) {
+                        if ( ti.isReadable ) {
                             ret = mesh.uv2;
                             if ( ret.Length == 0 ) {
                                 ret = mesh.uv;
                             }
-                        } finally {
-                            ti.isReadable = false;
-                            AssetDatabase.ImportAsset( assetPath );
+                        } else {
+                            try {
+                                ti.isReadable = true;
+                                AssetDatabase.ImportAsset( assetPath );
+                                ret = mesh.uv2;
+                                if ( ret.Length == 0 ) {
+                                    ret = mesh.uv;
+                                }
+                            } finally {
+                                ti.isReadable = false;
+                                AssetDatabase.ImportAsset( assetPath );
+                            }
                         }
                     }
                 } else {
@@ -154,12 +161,13 @@ namespace AresEditor.ArtistKit {
                         ret = mesh.uv;
                     }
                 }
-                _MeshUVsCache[ assetPath ] = ret;
+                _MeshUVsCache[ id ] = ret;
             }
             return ret;
         }
 
-        void OnGUI_Lightmap() {
+        Rect OnGUI_Lightmap() {
+            Rect selectRect = new Rect();
             var lightmaps = LightmapSettings.lightmaps;
             if ( lightmaps != null && lightmaps.Length > 0 ) {
                 EditorGUILayout.BeginVertical();
@@ -207,10 +215,16 @@ namespace AresEditor.ArtistKit {
                                         var color = Color.red;
                                         var _color = GUI.color;
                                         var rect = new Rect( a, b, c, d );
-                                        color.a = rect.Contains( Event.current.mousePosition ) ? 0.0f : 0.5f;
+                                        var mouseOvered = rect.Contains( Event.current.mousePosition );
+                                        color = mouseOvered ? Color.green : Color.red;
+                                        color.a = mouseOvered ? 0.0f : 0.5f;
                                         GUI.color = color;
                                         EditorGUI.DrawTextureAlpha( new Rect( a, b, c, d ), Texture2D.whiteTexture, ScaleMode.StretchToFill );
-                                        color.a = 1.0f;
+                                        color = mouseOvered ? Color.green : Color.red;
+                                        color.a = mouseOvered ? 0.5f : 0.0f;
+                                        if ( mouseOvered ) {
+                                            selectRect = new Rect( a, b, c, d );
+                                        }
                                         GUI.color = color;
                                         EditorGUI.DrawRect( new Rect( a - 1, b - 1, c + 2, 1 ), color );
                                         EditorGUI.DrawRect( new Rect( a - 1, b, 1, d ), color );
@@ -236,8 +250,13 @@ namespace AresEditor.ArtistKit {
                         m_window.minSize = size;
                     }
                 }
+                EditorGUILayout.LabelField(
+                    String.Format( "PixelRect: ( {0}, {1}, {2}, {3} )",
+                        selectRect.x, selectRect.y, selectRect.width, selectRect.height )
+                );
                 EditorGUILayout.EndVertical();
             }
+            return selectRect;
         }
 
         void OnGUI() {
