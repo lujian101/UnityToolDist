@@ -163,7 +163,7 @@ namespace AresEditor.ArcReactor {
                     EditorGUILayout.BeginHorizontal();
                     var _enabled = GUI.enabled;
                     GUI.enabled = false;
-                    EditorGUILayout.LabelField( String.Format( "m{0}{1}", c, r ), GUILayout.Width( 28 ) );
+                    EditorGUILayout.LabelField( String.Format( "m{0}{1}", r, c ), GUILayout.Width( 28 ) );
                     GUI.enabled = _props[ index ].editable;
                     var _color = GUI.color;
                     GUI.color = _props[ index ].color;

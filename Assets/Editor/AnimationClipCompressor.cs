@@ -734,10 +734,10 @@ namespace AresEditor.ArtistKit {
                 _in = Round0( _in );
                 _out = Round0( _out );
                 error += diff;
-                var lastkf = samples[ samples.Count - 1 ];
+                var lastkf = keyframes[ keyframes.Count - 1 ];
                 var skip = false;
-                var nextLinearValue = lastkf.keyframe.value + ( kf.time - lastkf.keyframe.time ) * lastkf.keyframe.outTangent;
-                if ( Math.Abs( kf.inTangent - lastkf.keyframe.outTangent ) < TangentEpsilon &&
+                var nextLinearValue = lastkf.value + ( kf.time - lastkf.time ) * lastkf.outTangent;
+                if ( Math.Abs( kf.inTangent - lastkf.outTangent ) < TangentEpsilon &&
                     Math.Abs( kf.inTangent - kf.outTangent ) < TangentEpsilon ) {
                     if ( Mathf.Abs( nextLinearValue - kf.value ) < epsilon ) {
                         skip = true;
