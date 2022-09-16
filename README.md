@@ -19,8 +19,8 @@ Unity's Notation | Memory Layout
 ### MonoScript SerializedField Viewer
 ![image](https://github.com/lujian101/UnityToolDist/blob/master/ScreenShot/mono-script-viewer.png?raw=true)
 
-### LightmapUV Viwer
+### LightmapUV Viewer
 ![image](https://github.com/lujian101/UnityToolDist/blob/master/ScreenShot/lightmap-viewer.png?raw=true)
 
-### UVSheet Viwer
+### UVSheet Viewer
 ![image](https://github.com/lujian101/UnityToolDist/blob/master/ScreenShot/uvsheet_viewer.png)
